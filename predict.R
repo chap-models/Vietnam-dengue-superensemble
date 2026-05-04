@@ -1,628 +1,334 @@
-# left side is the names used in the code, right side is the internal names in CHAP
-# Cases = number of cases
-# E = population
-# month = month
-# ID_year = year
-# ID_spat = location
-# rainsum = rainfall
-# meantemperature = mean_temperature
+# Column mapping (CHAP name → internal name):
+#   disease_cases → dengue_cases   (count outcome)
+#   population    → population     (offset)
+#   location      → areaid         (spatial unit)
+#   time_period   → tsdatetime     (YYYY-MM)
+#   month         → month
+#   year          → year (before seasonal shift)
 
-options(warn=1)
+options(warn = 1)
 
-#libraries
-
-
-#the predict function
-predict_chap <- function(model_fn, hist_fn, future_fn, preds_fn, graph_fn){
-  df <- read.csv(future_fn)
-  
-  #00 Functions
-    #A lot of helper functions used throughout the next sections 
-  
-  #01 Load packages
-    #will do this outside the function, have to make the docker image
-  
-  #02 Annual to monthly
-    # probablye not neccessary for CHAP, but maybe, could improve inference
-  
-  #03 Pre-processing
-  
-  den <- read_obs("dengue") #this calls a funcion from 00 that searches through all
-    # files with "dengue" and reads the first one, maybe alphabetically
-  d1  <- min(ymd(den$tsdatetime)) #gets the min date on ymd format
-  d2  <- max(den$tsdatetime) #gets the max date on some format?
-  
-  rm(den) #removes the object den from the workspace?
-  
-  myData <- hist_data("^observed.*?\\.csv") #loads cleaned historic data
-  
-  # forec
-  fore <- fore_data("^forecast.*?\\.csv") # loads the cleaned future/forecast data
-  
-  # unlink
-  unlink(paste0(file.path(input), "/",
-                list.files(path=file.path(input),
-                           pattern="population|rural|urban")))
-    #this deletes some of the files created earlier names population, rural or urban
-  
-  # Correct tsdatetime - converts the dates in the tsdatetime column
-  myData$tsdatetime <- ceiling_date(ymd(paste(year(myData$tsdatetime),
-                                              month(myData$tsdatetime),
-                                              "01", sep="-")), 'month') - days(1)
-  fore$tsdatetime <- ceiling_date(ymd(paste(year(fore$tsdatetime),
-                                            month(fore$tsdatetime),
-                                            "01", sep="-")), 'month') - days(1)
-  
-  #library(lubridate)
-  #ceiling_date(ymd("2020-01-01"), "month") - days(1)
-  
-  # Ensure unique dates - if non-unique rows they are averaged to one row instead
-  myData %<>% group_by(areaid, tsdatetime) %>%
-    dplyr::summarise_all(mean, na.rm=TRUE) 
-  
-  fore %<>% group_by(areaid, tsdatetime, ensmember) %>%
-    dplyr::summarise_all(mean, na.rm=TRUE)
-  
-  # geog, reads the geojson file with id-column province, should be "id" in CHAP
-  myMap <- rgdal::readOGR(file.path(input), "province") 
-  
-  # wrangling - makes new column for hist and future data
-  minDate           <- min(myData$tsdatetime)
-  names(myData)     <- gsub(" ", "_", names(myData)) # changes " " to "_" in colnames
-  myData$year       <- factor(lubridate::year(myData$tsdatetime))
-  myData$month      <- factor(lubridate::month(myData$tsdatetime))
-  myData$dtr        <- myData$maximum_temperature - myData$minimum_temperature
-  fore$year         <- factor(lubridate::year(fore$tsdatetime))
-  fore$month        <- factor(lubridate::month(fore$tsdatetime))
-  fore$dtr          <- fore$maximum_temperature - fore$minimum_temperature
-  
-  myData$incidence  <- (myData$dengue_cases / myData$population) * 1e5
-  
-  myData            <- inner_join(myData, myMap@data) 
-    #@data gets the tabular data from myMap, then the dataframes are knitted together
-    # and only locations present in both are kept, possibly also other shared columnnames
-    # fails if no shared columnnames, presumably the only shared name is "province"
-  
-  # times for the prediction period
-  d1 <- min(fore$tsdatetime)
-  d2 <- max(fore$tsdatetime)
-  
-  # add land to forecast - I do not understand this part - the monthly limits d1 and d2
-    # should make it so now annual data from annual2 is included, or is it not annual??
-  df1         <- sel_land(annual2)  #annual2 is a wide format df of the annual data
-  fore$areaid <- factor(fore$areaid)
-  fore        <- inner_join(fore, df1)
-  
-  # sel
-  newData <- myData %>%
-    ungroup() %>%
-    dplyr::select(areaid, tsdatetime,
-                  year, month, population,
-                  minimum_temperature, 
-                  maximum_temperature,
-                  precipitation_amount_per_day, 
-                  nino34_anomaly,
-                  specific_surface_humidity, dtr,
-                  wind_speed, periurban_landcover, 
-                  urban_landcover, rural_landcover, 
-                  dengue_cases) %>%
-    dplyr::mutate(ensmember="tsvalue_ensemble_00") %>%
-    data.table()
-  
-  newFore <- fore %>%
-    dplyr::mutate(dengue_cases=NA) %>%
-    dplyr::select(areaid, tsdatetime,
-                  year, month, population, 
-                  minimum_temperature, 
-                  maximum_temperature,
-                  precipitation_amount_per_day, 
-                  nino34_anomaly,
-                  specific_surface_humidity, dtr,
-                  wind_speed, periurban_landcover, 
-                  urban_landcover, rural_landcover, 
-                  dengue_cases, ensmember) %>%
-    data.table()
-  
-  newData <- rbind(newData, newFore)
-  
-  # rollm
-  
-  copytmin <- function(x){
-    x[is.na(x)] <- 0
-    x <- x + mintemp$baseline
-  }
-  
-  copytmax <- function(x){
-    x[is.na(x)] <- 0
-    x <- x + maxtemp$baseline
-  }
-  
-  copypre <- function(x){
-    x[is.na(x)] <- 0
-    x <- x + meanpre$baseline
-  }
-  
-  copyshum <- function(x){
-    x[is.na(x)] <- 0
-    x <- x + meanshum$baseline
-  }
-  
-  copydtr <- function(x){
-    x[is.na(x)] <- 0
-    x <- x + meandtr$baseline
-  }
-  
-  copynino <- function(x){
-    x[is.na(x)] <- 0
-    x <- x + meananom$baseline
-  }
-  
-  movav <- function(x) {
-    rollapply(x, width=3, FUN=mean,
-              fill=NA, align="right")
-  }
-  
-  movav2 <- function(x) {
-    rollapply(x, width=4, FUN=mean,
-              fill=NA, align="right")
-    
-  }
-  
-  mintemp <- dplyr::select(newData, areaid, tsdatetime, minimum_temperature,
-                           ensmember) %>%
-    tidyr::spread(ensmember, minimum_temperature) %>%
-    dplyr::rename(baseline=tsvalue_ensemble_00) %>%
-    dplyr::mutate(baseline=replace_na(baseline, 0)) 
-  
-  maxtemp <- dplyr::select(newData, areaid, tsdatetime, maximum_temperature,
-                           ensmember) %>%
-    tidyr::spread(ensmember, maximum_temperature) %>%
-    dplyr::rename(baseline=tsvalue_ensemble_00) %>%
-    dplyr::mutate(baseline=replace_na(baseline, 0)) 
-  
-  meanpre <- dplyr::select(newData, areaid, tsdatetime, 
-                           precipitation_amount_per_day, ensmember) %>%
-    tidyr::spread(ensmember, precipitation_amount_per_day) %>%
-    dplyr::rename(baseline=tsvalue_ensemble_00) %>%
-    dplyr::mutate(baseline=replace_na(baseline, 0)) 
-  
-  meanshum <- dplyr::select(newData, areaid, tsdatetime,
-                            specific_surface_humidity, ensmember) %>%
-    tidyr::spread(ensmember, specific_surface_humidity) %>%
-    dplyr::rename(baseline=tsvalue_ensemble_00) %>%
-    dplyr::mutate(baseline=replace_na(baseline, 0)) 
-  
-  meandtr <- dplyr::select(newData, areaid, tsdatetime, dtr,
-                           ensmember) %>%
-    tidyr::spread(ensmember, dtr) %>%
-    dplyr::rename(baseline=tsvalue_ensemble_00) %>%
-    dplyr::mutate(baseline=replace_na(baseline, 0)) 
-  
-  meananom <- dplyr::select(newData, areaid, tsdatetime, nino34_anomaly,
-                            ensmember) %>%
-    tidyr::spread(ensmember, nino34_anomaly) %>%
-    dplyr::rename(baseline=tsvalue_ensemble_00) %>%
-    dplyr::mutate(baseline=replace_na(baseline, 0)) 
-  
-  mintemp %<>%
-    mutate_at(vars(matches('tsvalue_ensemble_')),
-              copytmin) %>%
-    mutate_at(vars(matches('tsvalue_ensemble_')),
-              movav) %>%
-    dplyr::filter(tsdatetime >=d1) %>%
-    tidyr::gather(ensmember, tmin02, -(areaid:baseline)) %>%
-    dplyr::select(-baseline) %>%
-    data.table()
-  
-  maxtemp %<>%
-    mutate_at(vars(matches('tsvalue_ensemble_')),
-              copytmax) %>%
-    mutate_at(vars(matches('tsvalue_ensemble_')),
-              movav) %>%
-    dplyr::filter(tsdatetime >=d1) %>%
-    tidyr::gather(ensmember, tmax02, -(areaid:baseline)) %>%
-    dplyr::select(-baseline) %>%
-    data.table()
-  
-  meanpre %<>%
-    mutate_at(vars(matches('tsvalue_ensemble_')),
-              copypre) %>%
-    mutate_at(vars(matches('tsvalue_ensemble_')),
-              movav) %>%
-    dplyr::filter(tsdatetime >=d1) %>%
-    tidyr::gather(ensmember, pre02, -(areaid:baseline)) %>%
-    dplyr::select(-baseline) %>%
-    data.table()
-  
-  meanshum %<>%
-    mutate_at(vars(matches('tsvalue_ensemble_')),
-              copyshum) %>%
-    mutate_at(vars(matches('tsvalue_ensemble_')),
-              movav) %>%
-    dplyr::filter(tsdatetime >=d1) %>%
-    tidyr::gather(ensmember, shum02, -(areaid:baseline)) %>%
-    dplyr::select(-baseline) %>%
-    data.table()
-  
-  meandtr %<>%
-    mutate_at(vars(matches('tsvalue_ensemble_')),
-              copydtr) %>%
-    mutate_at(vars(matches('tsvalue_ensemble_')),
-              movav) %>%
-    dplyr::filter(tsdatetime >=d1) %>%
-    tidyr::gather(ensmember, dtr02, -(areaid:baseline)) %>%
-    dplyr::select(-baseline) %>%
-    data.table()
-  
-  meananom %<>%
-    mutate_at(vars(matches('tsvalue_ensemble_')),
-              copynino) %>%
-    mutate_at(vars(matches('tsvalue_ensemble_')),
-              movav2) %>%
-    dplyr::filter(tsdatetime >=d1) %>%
-    tidyr::gather(ensmember, nino3403, -(areaid:baseline)) %>%
-    dplyr::select(-baseline) %>%
-    data.table()
-  
-  newData %<>% group_by(areaid, ensmember) %>%
-    dplyr::mutate(
-      tmin02=rollapply(minimum_temperature, width=3, FUN=mean,
-                       fill=NA, align="right"),
-      tmax02=rollapply(maximum_temperature, width=3, FUN=mean,
-                       fill=NA, align="right"),
-      pre02=rollapply(precipitation_amount_per_day, width=3, FUN=mean,
-                      fill=NA, align="right"),
-      shum02=rollapply(specific_surface_humidity, width=3, FUN=mean,
-                       fill=NA, align="right"),
-      dtr02=rollapply(dtr, width=3, FUN=mean,
-                      fill=NA, align="right"),
-      nino3403=rollapply(nino34_anomaly, width=4, FUN=mean,
-                         fill=NA, align="right")) 
-  newData$tmin02[newData$tsdatetime >= d1] <- NA
-  newData$tmax02[newData$tsdatetime >= d1] <- NA
-  newData$pre02[newData$tsdatetime >= d1] <- NA
-  newData$shum02[newData$tsdatetime >= d1] <- NA
-  newData$dtr02[newData$tsdatetime >= d1] <- NA
-  
-  newData$areaid  <- as.numeric(as.character(newData$areaid))
-  mintemp$areaid  <- as.numeric(as.character(mintemp$areaid))
-  maxtemp$areaid  <- as.numeric(as.character(maxtemp$areaid))
-  meanpre$areaid  <- as.numeric(as.character(meanpre$areaid))
-  meanshum$areaid <- as.numeric(as.character(meanshum$areaid))
-  meandtr$areaid  <- as.numeric(as.character(meandtr$areaid))
-  meananom$areaid <- as.numeric(as.character(meananom$areaid))
-  
-  newData %<>% left_join(mintemp, by=c('areaid', 'tsdatetime', 'ensmember')) %>%
-    dplyr::mutate(tmin02=coalesce(tmin02.x, tmin02.y)) %>%
-    dplyr::select(-tmin02.x, -tmin02.y)
-  newData %<>% left_join(maxtemp, by=c('areaid', 'tsdatetime', 'ensmember')) %>%
-    dplyr::mutate(tmax02=coalesce(tmax02.x, tmax02.y)) %>%
-    dplyr::select(-tmax02.x, -tmax02.y)
-  newData %<>% left_join(meanpre, by=c('areaid', 'tsdatetime', 'ensmember')) %>%
-    dplyr::mutate(pre02=coalesce(pre02.x, pre02.y)) %>%
-    dplyr::select(-pre02.x, -pre02.y)
-  newData %<>% left_join(meanshum, by=c('areaid', 'tsdatetime', 'ensmember')) %>%
-    dplyr::mutate(shum02=coalesce(shum02.x, shum02.y)) %>%
-    dplyr::select(-shum02.x, -shum02.y)
-  newData %<>% left_join(meandtr, by=c('areaid', 'tsdatetime', 'ensmember')) %>%
-    dplyr::mutate(dtr02=coalesce(dtr02.x, dtr02.y)) %>%
-    dplyr::select(-dtr02.x, -dtr02.y)
-  newData %<>% left_join(meananom, by=c('areaid', 'tsdatetime', 'ensmember')) %>%
-    dplyr::mutate(nino3403=coalesce(nino3403.x, nino3403.y)) %>%
-    dplyr::select(-nino3403.x, -nino3403.y)
-  
-  # New season
-  newData %<>% dplyr::mutate(
-    date2=tsdatetime %m-% months(6),
-    month2=month(date2),
-    year2=year(date2)
-  )
-  
-  # IDs
-  newData$areaid       <- factor(newData$areaid)
-  newData$ID.area      <- as.numeric(newData$areaid)
-  newData$ID.area1     <- as.numeric(newData$areaid)
-  newData$ID.area2     <- as.numeric(newData$areaid)
-  newData$ID.year      <- as.numeric(as.character(newData$year2))
-  newData$ID.year1     <- as.numeric(as.character(newData$year2))
-  newData$ID.month     <- as.numeric(as.character(newData$month2))
-  newData$ID.month1    <- as.numeric(as.character(newData$month2))
-  
-  # Lagged obs
-  newData %<>% group_by(areaid) %>%
-    dplyr::mutate(dengueL1=lag(dengue_cases, 1))
-  
-  rm(myData, fore)
-  
-  
-  # ----------------
-  # Eof
-  # ----------------
-  
-  #04 Fit models
-  temp    <- poly2nb(myMap, queen=FALSE) #myMap is defined earlier in 03 pre-processing
-  nb2INLA("vnm_graph", temp) #creates a file in the working directory
-  vnm.adj <- paste(getwd(), "/vnm_graph", sep="") #which is read in here
-  #maybe use a non-relative file path above, not sure
-  
-  #Model 0 - bym + iid_t_y + ar1_t_m, the last to are grouped on some area column
-    # so the iid is per region per year and the ar1 is monthly for each region
-    # with an iid distribuition, so shared hyperparameters? not sure what loglag is
-  f0 <- dengue_cases ~ loglag +
-    f(ID.area, model='bym', graph=vnm.adj, 
-      adjust.for.con.comp=FALSE, constr=TRUE, 
-      scale.model=TRUE, 
-      hyper = list(prec.unstruct=list(prior='pc.prec',param=c(3, 0.01)),
-                   prec.spatial=list(prior='pc.prec', param=c(3, 0.01)))) +
-    f(ID.year, model='iid', 
-      hyper=list(prec = list(prior='pc.prec',param = c(3, 0.01))),
-      group=ID.area2, 
-      control.group=list(model='iid',hyper = list(
-        prec = list(prior='pc.prec',param=c(3, 0.01))))) + 
-    f(ID.month1, model='ar1', 
-      hyper = list(prec=list(prior='pc.prec',param=c(3, 0.01)),
-                   rho = list(prior='pc.cor1', param = c(0.5, 0.75))),
-      group=ID.area1, 
-      control.group = list(model='iid',
-                           hyper=list(prec=list(prior='pc.prec',
-                                                param=c(3, 0.01)))))
-  
-  #Model 0 needs loglag, ID.area, ID.area1, ID.area2, ID.year, ID.month1
-  
-  #Model 1 - adds 6 environmental features
-  f1 <- dengue_cases ~ loglag +
-    # Spatial random effect
-    f(ID.area, model='bym', graph=vnm.adj, 
-      adjust.for.con.comp=FALSE, constr=TRUE, 
-      scale.model=TRUE, 
-      # Precision of unstructure random effects
-      hyper = list(prec.unstruct=list(prior='pc.prec',param=c(3, 0.01)),
-                   prec.spatial=list(prior='pc.prec', param=c(3, 0.01)))) +
-    # Year random effect
-    f(ID.year, model='iid', 
-      hyper=list(prec = list(prior='pc.prec',param = c(3, 0.01))),
-      group=ID.area2, 
-      control.group=list(model='iid',hyper = list(
-        prec = list(prior='pc.prec',param=c(3, 0.01))))) + 
-    f(ID.month1, model='ar1', 
-      hyper = list(prec=list(prior='pc.prec',param=c(3, 0.01)),
-                   # Autocorrelation
-                   rho = list(prior='pc.cor1', param = c(0.5, 0.75))),
-      group=ID.area1, 
-      control.group = list(model='iid',
-                           hyper=list(prec=list(prior='pc.prec',
-                                                param=c(3, 0.01))))) +
-    # Remaining fixed effects
-    periurban_landcover + urban_landcover +
-    shum02 + wind_speed + dtr02 + nino3403 
-  
-  #Model 1 needs loglag, ID.area, ID.area1, ID.area2, ID.year, ID.month1 and 6 covariates
-  
-  #Model 2 - removes 2 of the 6 added covariates above
-  f2 <- dengue_cases ~ loglag +
-    f(ID.area, model='bym', graph=vnm.adj, 
-      adjust.for.con.comp=FALSE, constr=TRUE, 
-      scale.model=TRUE, 
-      hyper = list(prec.unstruct=list(prior='pc.prec',param=c(3, 0.01)),
-                   prec.spatial=list(prior='pc.prec', param=c(3, 0.01)))) +
-    f(ID.year, model='iid', 
-      hyper=list(prec = list(prior='pc.prec',param = c(3, 0.01))),
-      group=ID.area2, 
-      control.group=list(model='iid',hyper = list(
-        prec = list(prior='pc.prec',param=c(3, 0.01))))) + 
-    f(ID.month1, model='ar1', 
-      hyper = list(prec=list(prior='pc.prec',param=c(3, 0.01)),
-                   rho = list(prior='pc.cor1', param = c(0.5, 0.75))),
-      group=ID.area1, 
-      control.group = list(model='iid',
-                           hyper=list(prec=list(prior='pc.prec',
-                                                param=c(3, 0.01))))) + 
-    # Remaing fixed effects
-    periurban_landcover + urban_landcover + 
-    shum02 + dtr02 
-  
-  #Model 2 needs loglag, ID.area, ID.area1, ID.area2, ID.year, ID.month1 and 4 covariates
-  
-  #Model 3 - uses four earlier covariates and adds a new one, tmin02
-  f3 <- dengue_cases ~ loglag +
-    f(ID.area, model='bym', graph=vnm.adj, 
-      adjust.for.con.comp=FALSE, constr=TRUE, 
-      scale.model=TRUE, 
-      hyper = list(prec.unstruct=list(prior='pc.prec',param=c(3, 0.01)),
-                   prec.spatial=list(prior='pc.prec', param=c(3, 0.01)))) +
-    f(ID.year, model='iid', 
-      hyper=list(prec = list(prior='pc.prec',param = c(3, 0.01))),
-      group=ID.area2, 
-      control.group=list(model='iid',hyper = list(
-        prec = list(prior='pc.prec',param=c(3, 0.01))))) + 
-    f(ID.month1, model='ar1', 
-      hyper = list(prec=list(prior='pc.prec',param=c(3, 0.01)),
-                   rho = list(prior='pc.cor1', param = c(0.5, 0.75))),
-      group=ID.area1, 
-      control.group = list(model='iid',
-                           hyper=list(prec=list(prior='pc.prec',
-                                                param=c(3, 0.01))))) + 
-    # Remaing fixed effects
-    periurban_landcover + urban_landcover + 
-    tmin02 + dtr02 + nino3403
-  
-  #Model 3 needs loglag, ID.area, ID.area1, ID.area2, ID.year, ID.month1 and 5 covariates(1 new)
-  
-  #Model 4 - 3 from earlier and one new, tmax02
-  f4 <- dengue_cases ~ loglag +
-    f(ID.area, model='bym', graph=vnm.adj, 
-      adjust.for.con.comp=FALSE, constr=TRUE, 
-      scale.model=TRUE, 
-      hyper = list(prec.unstruct=list(prior='pc.prec',param=c(3, 0.01)),
-                   prec.spatial=list(prior='pc.prec', param=c(3, 0.01)))) +
-    f(ID.year, model='iid', 
-      hyper=list(prec = list(prior='pc.prec',param = c(3, 0.01))),
-      group=ID.area2, 
-      control.group=list(model='iid',hyper = list(
-        prec = list(prior='pc.prec',param=c(3, 0.01))))) + 
-    f(ID.month1, model='ar1', 
-      hyper = list(prec=list(prior='pc.prec',param=c(3, 0.01)),
-                   rho = list(prior='pc.cor1', param = c(0.5, 0.75))),
-      group=ID.area1, 
-      control.group = list(model='iid',
-                           hyper=list(prec=list(prior='pc.prec',
-                                                param=c(3, 0.01))))) + 
-    # Remaing fixed effects
-    periurban_landcover + urban_landcover + 
-    tmin02 + tmax02
-  
-  #Model 4 needs loglag, ID.area, ID.area1, ID.area2, ID.year, ID.month1 and 4 covariates(1 new)
-  
-  #Model 5 - 3 earlier covariates
-  f5 <- dengue_cases ~ loglag +
-    f(ID.area, model='bym', graph=vnm.adj, 
-      adjust.for.con.comp=FALSE, constr=TRUE, 
-      scale.model=TRUE, 
-      hyper = list(prec.unstruct=list(prior='pc.prec',param=c(3, 0.01)),
-                   prec.spatial=list(prior='pc.prec', param=c(3, 0.01)))) +
-    f(ID.year, model='iid', 
-      hyper=list(prec = list(prior='pc.prec',param = c(3, 0.01))),
-      group=ID.area2, 
-      control.group=list(model='iid',hyper = list(
-        prec = list(prior='pc.prec',param=c(3, 0.01))))) + 
-    f(ID.month1, model='ar1', 
-      hyper = list(prec=list(prior='pc.prec',param=c(3, 0.01)),
-                   rho = list(prior='pc.cor1', param = c(0.5, 0.75))),
-      group=ID.area1, 
-      control.group = list(model='iid',
-                           hyper=list(prec=list(prior='pc.prec',
-                                                param=c(3, 0.01))))) + 
-    # Remaing fixed effects
-    periurban_landcover + urban_landcover + 
-    wind_speed
-  
-  #Model 5 needs loglag, ID.area, ID.area1, ID.area2, ID.year, ID.month1 and 3 covariates
-  
-  #Fitting the models
-    #It seems like they fit the model for the next timepoint, then add that do the dataset
-    #and predict for the next one iteratively for each of the 6 models
-    #the code is very repetative, maybe a nested for loop instead? Also very time consuming
-    #Also not sure if they get samples
-  
-  #there are some ensemble stuff as well, some weighting with likelihoods and means etc
-  #they also use the function fitmargBMA2 for this purpose, not user defined
-  
-  
-  
-  
-  write.csv(df_preds, preds_fn, row.names = FALSE)
-}
-
-#code for running the file from the command line interface used by CHAP
-args <- commandArgs(trailingOnly = TRUE)
-
-if (length(args) >= 1) {
-  model_fn <- args[1]
-  hist_fn <- args[2]
-  future_fn <- args[3]
-  preds_fn <- args[4]
-  graph_fn <- args[5]
-  
-  predict_chap(model_fn, hist_fn, future_fn, preds_fn, graph_fn)
-}
-
-
-
-### An example from chap ewars of the standard structure in predict.R--------
 library(INLA)
-library(dlnm)
 library(dplyr)
-
-#for spatial effects
-library(sf)
+library(tidyr)
+library(lubridate)
+library(zoo)
 library(spdep)
+library(sf)
+source("lib.R")
 
-predict_chap <- function(model_fn, hist_fn, future_fn, preds_fn, graph_fn){
-  #model <- readRDS(file = model_fn) #would normally load a model here
-  
-  df <- read.csv(future_fn)
-  df$Cases <- rep(NA, nrow(df))
-  df$disease_cases <- rep(NA, nrow(df)) #so we can rowbind it with historic
-  
-  historic_df = read.csv(hist_fn)
-  df <- rbind(historic_df, df)
-  df <- mutate(df, ID_year = ID_year - min(df$ID_year) + 1)
-  
-  #adding a counting variable for the months like 1, ..., 12, 13, ...
-  #could also do years*12 + months, but fails for weeks
-  df <-group_by(df, location) |>
-    mutate(month_num = row_number())
-  
-  basis_meantemperature <- crossbasis(df$meantemperature, lag=3,
-                                      argvar = list(fun = "ns", knots = equalknots(df$meantemperature, 2)),
-                                      arglag = list(fun = "ns", knots = 3/2), group = df$ID_spat)
-  colnames(basis_meantemperature) = paste0("basis_meantemperature.", colnames(basis_meantemperature))
-  
-  basis_rainsum <- crossbasis(df$rainsum, lag=3,
-                              argvar = list(fun = "ns", knots = equalknots(df$rainsum, 2)),
-                              arglag = list(fun = "ns", knots = 3/2), group = df$ID_spat)
-  colnames(basis_rainsum) = paste0("basis_rainsum.", colnames(basis_rainsum))
-  
-  df$ID_spat <- as.factor(df$ID_spat)
-  df$ID_spat_num <- as.numeric(as.factor(df$ID_spat))
-  
-  df <- cbind(df, basis_meantemperature, basis_rainsum)
-  
-  # the formula without spatial smoothing and with some specified PC priors
-  #lagged_formula <- Cases ~ 1 + f(ID_spat, model='iid', hyper=list(prec = list(prior = "pc.prec",
-  #  param = c(1, 0.01)))) + f(month_num, model = "rw1", scale.model = T,
-  #  replicate = ID_spat_num, hyper=list(prec = list(prior = "pc.prec", param = c(1, 0.01)))) +
-  #  f(month, model='rw1', cyclic=T, scale.model=T, hyper=list(prec = list(prior = "pc.prec",
-  #  param = c(1, 0.01)))) + basis_meantemperature + basis_rainsum
-  
-  lagged_formula <- Cases ~ 1 + f(ID_spat, model='iid') + f(month_num, model = "rw1", scale.model = T,
-                                                            replicate = ID_spat_num) +
-    f(month, model='rw1', cyclic=T, scale.model=T) + basis_meantemperature + basis_rainsum
-  
-  
-  model <- inla(formula = lagged_formula, data = df, family = "nbinomial", offset = log(E),
-                control.inla = list(strategy = 'adaptive'),
-                control.compute = list(config = TRUE, return.marginals = FALSE),
-                control.fixed = list(correlation.matrix = TRUE, prec.intercept = 0.1, prec = 1),
-                control.predictor = list(link = 1, compute = TRUE),
-                verbose = F, safe=FALSE)
-  
-  casestopred <- df$Cases # response variable
-  
-  # Predict only for the cases where the response variable is missing
-  idx.pred <- which(is.na(casestopred)) #this then also predicts for historic values that are NA, not ideal
-  mpred <- length(idx.pred)
-  s <- 1000
-  y.pred <- matrix(NA, mpred, s)
-  # Sample parameters of the model
-  xx <- inla.posterior.sample(s, model)  # This samples parameters of the model
-  xx.s <- inla.posterior.sample.eval(function(idx.pred) c(theta[1], Predictor[idx.pred]), xx, idx.pred = idx.pred) # This extracts the expected value and hyperparameters from the samples
-  
-  # Sample predictions
-  for (s.idx in 1:s){
-    xx.sample <- xx.s[, s.idx]
-    y.pred[, s.idx] <- rnbinom(mpred,  mu = exp(xx.sample[-1]), size = xx.sample[1])
+predict_chap <- function(model_fn, hist_fn, future_fn, preds_fn, geojson_fn) {
+
+  # ------------------------------------------------------------------
+  # 1. Load data
+  # ------------------------------------------------------------------
+  historic_df <- read.csv(hist_fn, stringsAsFactors = FALSE)
+  future_df   <- read.csv(future_fn, stringsAsFactors = FALSE)
+
+  # Future data has no outcome; add NA column so rbind works
+  future_df$disease_cases <- NA_integer_
+
+  df <- bind_rows(historic_df, future_df)
+
+  # ------------------------------------------------------------------
+  # 2. Map to internal column names
+  #    CHAP's adapter system may have already added areaid/dengue_cases
+  #    alongside location/disease_cases, so we assign rather than rename
+  #    to avoid duplicate-column errors.
+  # ------------------------------------------------------------------
+  if (!"areaid" %in% names(df))       df$areaid       <- df$location
+  if (!"dengue_cases" %in% names(df)) df$dengue_cases <- df$disease_cases
+
+  df$tsdatetime <- ymd(paste0(df$time_period, "-01"))
+
+  # ------------------------------------------------------------------
+  # 3. Sort (required for rolling means and lags)
+  # ------------------------------------------------------------------
+  df <- df %>% arrange(areaid, tsdatetime)
+
+  # ------------------------------------------------------------------
+  # 4. Derived variable: diurnal temperature range
+  # ------------------------------------------------------------------
+  df$dtr <- df$maximum_temperature - df$minimum_temperature
+
+  # ------------------------------------------------------------------
+  # 5. Rolling means within province (model-specific preprocessing)
+  #    3-month window: temperature, precipitation, humidity, dtr
+  #    4-month window: Niño 3.4 (captures ENSO lead time)
+  # ------------------------------------------------------------------
+  df <- df %>%
+    group_by(areaid) %>%
+    mutate(
+      tmin02   = rollapply(minimum_temperature,          3, mean, fill = NA, align = "right"),
+      tmax02   = rollapply(maximum_temperature,          3, mean, fill = NA, align = "right"),
+      shum02   = rollapply(specific_surface_humidity,    3, mean, fill = NA, align = "right"),
+      dtr02    = rollapply(dtr,                          3, mean, fill = NA, align = "right"),
+      nino3403 = rollapply(nino34_anomaly,               4, mean, fill = NA, align = "right")
+    ) %>%
+    # Back-fill NAs from the short rolling-mean warm-up period with the
+    # first available value per province so INLA receives no NA covariates.
+    fill(tmin02, tmax02, shum02, dtr02, nino3403, .direction = "up") %>%
+    ungroup()
+
+  # ------------------------------------------------------------------
+  # 6. Seasonal index shift (−6 months)
+  #    The model's temporal random effects align with epidemiological
+  #    season, which peaks roughly 6 months after the climate signal.
+  # ------------------------------------------------------------------
+  df$date2    <- df$tsdatetime %m-% months(6)
+  df$ID.year  <- year(df$date2)
+  df$ID.month <- month(df$date2)
+
+  # Normalise year index to start at 1
+  df$ID.year <- df$ID.year - min(df$ID.year) + 1L
+
+  # ------------------------------------------------------------------
+  # 7. Lagged dengue cases
+  #    For the forecast period CHAP calls predict_chap once per month,
+  #    passing updated historic data that includes the previous
+  #    prediction. This means lag(dengue_cases, 1) is always defined
+  #    for the single forecast row produced per call. For any remaining
+  #    NA lags (first row of history per province), we use 0.
+  # ------------------------------------------------------------------
+  df <- df %>%
+    group_by(areaid) %>%
+    mutate(dengueL1 = dplyr::lag(dengue_cases, 1)) %>%
+    ungroup()
+
+  # Fill NA lags (forecast months where previous row is also NA or missing)
+  # with the last known observed count for that province.
+  last_obs <- df %>%
+    filter(!is.na(dengue_cases)) %>%
+    group_by(areaid) %>%
+    slice_tail(n = 1) %>%
+    select(areaid, last_dengue = dengue_cases) %>%
+    ungroup()
+
+  df <- df %>%
+    left_join(last_obs, by = "areaid") %>%
+    mutate(dengueL1 = if_else(is.na(dengueL1), last_dengue, dengueL1),
+           dengueL1 = if_else(is.na(dengueL1), 0, dengueL1)) %>%
+    select(-last_dengue)
+
+  df$loglag <- log1p(df$dengueL1)
+
+  # ------------------------------------------------------------------
+  # 8. Numeric IDs for INLA random effects
+  # ------------------------------------------------------------------
+  df$areaid   <- factor(df$areaid)
+  df$ID.area  <- as.integer(df$areaid)
+  df$ID.area1 <- df$ID.area   # replicate index for AR1 group
+  df$ID.area2 <- df$ID.area   # replicate index for IID year group
+  df$ID.month1 <- as.integer(df$ID.month)
+  df$ID.year   <- as.integer(df$ID.year)
+
+  # ------------------------------------------------------------------
+  # 9. Spatial adjacency graph from GeoJSON
+  #    The GeoJSON must contain a "province" property matching areaid.
+  #    Replace geojson_fn with the real Vietnam province file in production.
+  # ------------------------------------------------------------------
+  map <- st_read(geojson_fn, quiet = TRUE)
+
+  # Identify province ID column (first non-geometry column)
+  id_col <- setdiff(names(map), attr(map, "sf_column"))[1]
+
+  # Re-order GeoJSON rows to match areaid factor levels so poly2nb
+  # indices correspond to ID.area integers.
+  prov_levels <- levels(df$areaid)
+  row_order   <- match(prov_levels, map[[id_col]])
+  if (any(is.na(row_order))) {
+    stop("GeoJSON is missing provinces: ",
+         paste(prov_levels[is.na(row_order)], collapse = ", "))
   }
-  
-  # make a dataframe where first column is the time points, second column is the location, rest is the samples
-  # rest of columns should be called sample_0, sample_1, etc
-  new.df = data.frame(time_period = df$time_period[idx.pred], location = df$location[idx.pred], y.pred)
-  colnames(new.df) = c('time_period', 'location', paste0('sample_', 0:(s-1)))
-  
-  # Write new dataframe to file
-  write.csv(new.df, preds_fn, row.names = FALSE)
-  #saveRDS(model, file = model_fn) # to evaluate the model
+  map <- map[row_order, ]
+
+  nb      <- poly2nb(map, queen = FALSE)
+  adj_tmp <- tempfile(fileext = ".graph")
+  nb2INLA(adj_tmp, nb)
+  vnm.adj <- adj_tmp
+
+  # ------------------------------------------------------------------
+  # 10. Model formulas (identical to Colón-González et al. 2021)
+  #     All models share the BYM spatial + IID year-by-province +
+  #     AR1 month-by-province random effects and a log-lag covariate.
+  #     They differ in which environmental fixed effects are included.
+  # ------------------------------------------------------------------
+  pc3  <- list(prior = "pc.prec", param = c(3, 0.01))
+  pc_r <- list(prior = "pc.cor1", param = c(0.5, 0.75))
+
+  f1 <- dengue_cases ~ loglag +
+    f(ID.area,  model = "bym", graph = vnm.adj,
+      adjust.for.con.comp = FALSE, constr = TRUE, scale.model = TRUE,
+      hyper = list(prec.unstruct = pc3, prec.spatial = pc3)) +
+    f(ID.year,  model = "iid", hyper = list(prec = pc3),
+      group = ID.area2,
+      control.group = list(model = "iid", hyper = list(prec = pc3))) +
+    f(ID.month1, model = "ar1", hyper = list(prec = pc3, rho = pc_r),
+      group = ID.area1,
+      control.group = list(model = "iid", hyper = list(prec = pc3))) +
+    periurban_landcover + urban_landcover +
+    shum02 + wind_speed + dtr02 + nino3403
+
+  f2 <- dengue_cases ~ loglag +
+    f(ID.area,  model = "bym", graph = vnm.adj,
+      adjust.for.con.comp = FALSE, constr = TRUE, scale.model = TRUE,
+      hyper = list(prec.unstruct = pc3, prec.spatial = pc3)) +
+    f(ID.year,  model = "iid", hyper = list(prec = pc3),
+      group = ID.area2,
+      control.group = list(model = "iid", hyper = list(prec = pc3))) +
+    f(ID.month1, model = "ar1", hyper = list(prec = pc3, rho = pc_r),
+      group = ID.area1,
+      control.group = list(model = "iid", hyper = list(prec = pc3))) +
+    periurban_landcover + urban_landcover +
+    shum02 + dtr02
+
+  f3 <- dengue_cases ~ loglag +
+    f(ID.area,  model = "bym", graph = vnm.adj,
+      adjust.for.con.comp = FALSE, constr = TRUE, scale.model = TRUE,
+      hyper = list(prec.unstruct = pc3, prec.spatial = pc3)) +
+    f(ID.year,  model = "iid", hyper = list(prec = pc3),
+      group = ID.area2,
+      control.group = list(model = "iid", hyper = list(prec = pc3))) +
+    f(ID.month1, model = "ar1", hyper = list(prec = pc3, rho = pc_r),
+      group = ID.area1,
+      control.group = list(model = "iid", hyper = list(prec = pc3))) +
+    periurban_landcover + urban_landcover +
+    tmin02 + dtr02 + nino3403
+
+  f4 <- dengue_cases ~ loglag +
+    f(ID.area,  model = "bym", graph = vnm.adj,
+      adjust.for.con.comp = FALSE, constr = TRUE, scale.model = TRUE,
+      hyper = list(prec.unstruct = pc3, prec.spatial = pc3)) +
+    f(ID.year,  model = "iid", hyper = list(prec = pc3),
+      group = ID.area2,
+      control.group = list(model = "iid", hyper = list(prec = pc3))) +
+    f(ID.month1, model = "ar1", hyper = list(prec = pc3, rho = pc_r),
+      group = ID.area1,
+      control.group = list(model = "iid", hyper = list(prec = pc3))) +
+    periurban_landcover + urban_landcover +
+    tmin02 + tmax02
+
+  f5 <- dengue_cases ~ loglag +
+    f(ID.area,  model = "bym", graph = vnm.adj,
+      adjust.for.con.comp = FALSE, constr = TRUE, scale.model = TRUE,
+      hyper = list(prec.unstruct = pc3, prec.spatial = pc3)) +
+    f(ID.year,  model = "iid", hyper = list(prec = pc3),
+      group = ID.area2,
+      control.group = list(model = "iid", hyper = list(prec = pc3))) +
+    f(ID.month1, model = "ar1", hyper = list(prec = pc3, rho = pc_r),
+      group = ID.area1,
+      control.group = list(model = "iid", hyper = list(prec = pc3))) +
+    periurban_landcover + urban_landcover +
+    wind_speed
+
+  formulas <- list(f1, f2, f3, f4, f5)
+
+  # ------------------------------------------------------------------
+  # 11. Fit all candidate models
+  # TODO: remove per-model prints once Docker convergence is confirmed
+  # ------------------------------------------------------------------
+  fit_model <- function(formula, idx) {
+    cat(sprintf("Fitting model %d ...\n", idx))
+    result <- tryCatch(
+      inla(
+        formula,
+        family            = "nbinomial",
+        data              = df,
+        offset            = log(pmax(df$population, 1)),
+        control.predictor = list(compute = TRUE, link = 1),
+        control.compute   = list(dic = TRUE, config = TRUE,
+                                 return.marginals = FALSE),
+        control.inla      = list(strategy = "simplified.laplace"),
+        verbose           = FALSE,
+        safe              = FALSE
+      ),
+      error = function(e) {
+        # TODO: remove fallback once Docker convergence is confirmed
+        cat(sprintf("Model %d failed with simplified.laplace, retrying with laplace ...\n", idx))
+        inla(
+          formula,
+          family            = "nbinomial",
+          data              = df,
+          offset            = log(pmax(df$population, 1)),
+          control.predictor = list(compute = TRUE, link = 1),
+          control.compute   = list(dic = TRUE, config = TRUE,
+                                   return.marginals = FALSE),
+          control.inla      = list(strategy = "laplace"),
+          verbose           = FALSE,
+          safe              = FALSE
+        )
+      }
+    )
+    cat(sprintf("Model %d done (DIC = %.1f)\n", idx, result$dic$dic))
+    result
+  }
+
+  myModels <- mapply(fit_model, formulas, seq_along(formulas), SIMPLIFY = FALSE)
+
+  # ------------------------------------------------------------------
+  # 12. BMA weights: 50 % marginal likelihood + 50 % DIC
+  # ------------------------------------------------------------------
+  mliks   <- get.mliks(myModels)
+  dics    <- get.dics(myModels)
+  # reweight() is a softmax: higher values → higher weight.
+  # For mlik this is correct directly; for DIC, lower = better fit, so negate
+  # before softmax. The original code used reweight(dics) without negation,
+  # which would favour worse-fitting models — treated here as a bug.
+  weights <- reweight(mliks) * 0.5 + reweight(-dics) * 0.5
+
+  # ------------------------------------------------------------------
+  # 13. Posterior predictive samples (1000 total from BMA mixture)
+  # ------------------------------------------------------------------
+  s        <- 1000L
+  idx.pred <- which(is.na(df$dengue_cases))
+  mpred    <- length(idx.pred)
+
+  n_per_model <- round(weights * s)
+  # Adjust for integer rounding so samples sum to exactly s
+  diff <- s - sum(n_per_model)
+  n_per_model[which.max(weights)] <- n_per_model[which.max(weights)] + diff
+
+  y.pred <- matrix(NA_integer_, mpred, 0)
+
+  for (m in seq_along(myModels)) {
+    nm <- n_per_model[m]
+    if (nm < 1L) next
+
+    # Re-fit with marginals enabled for sampling
+    xx    <- inla.posterior.sample(nm, myModels[[m]])
+    xx.s  <- inla.posterior.sample.eval(
+      function(idx.pred) c(theta[1], Predictor[idx.pred]),
+      xx,
+      idx.pred = idx.pred
+    )
+
+    y_m <- apply(xx.s, 2, function(col) {
+      as.integer(rnbinom(mpred, mu = exp(col[-1]), size = exp(col[1])))
+    })
+    if (is.vector(y_m)) y_m <- matrix(y_m, nrow = mpred)
+    y.pred <- cbind(y.pred, y_m)
+  }
+
+  # ------------------------------------------------------------------
+  # 14. Write output
+  # ------------------------------------------------------------------
+  out <- data.frame(
+    time_period = format(df$tsdatetime[idx.pred], "%Y-%m"),
+    location    = as.character(df$areaid[idx.pred]),
+    y.pred,
+    stringsAsFactors = FALSE
+  )
+  colnames(out) <- c("time_period", "location", paste0("sample_", 0L:(s - 1L)))
+  write.csv(out, preds_fn, row.names = FALSE)
 }
 
 args <- commandArgs(trailingOnly = TRUE)
-
-if (length(args) >= 1) {
-  model_fn <- args[1]
-  hist_fn <- args[2]
-  future_fn <- args[3]
-  preds_fn <- args[4]
-  graph_fn <- args[5]
-  
-  predict_chap(model_fn, hist_fn, future_fn, preds_fn, graph_fn)
+if (length(args) >= 4) {
+  predict_chap(
+    model_fn   = args[1],
+    hist_fn    = args[2],
+    future_fn  = args[3],
+    preds_fn   = args[4],
+    geojson_fn = if (length(args) >= 5) args[5] else ""
+  )
 }
-

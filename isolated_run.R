@@ -1,11 +1,16 @@
-
 source("train.R")
 source("predict.R")
 
-#test with random data
-train_chap("example_data/training_data.csv", "model")
-predict_chap("model", "example_data/historic_data.csv", "example_data/future_data.csv", "example_data/predictions.csv", "graph_fn")
+train_chap(
+  train_fn   = "example_data/historic_data.csv",
+  model_fn   = "model",
+  geojson_fn = "example_data/historic_data.geojson"
+)
 
-
-#testing
-
+predict_chap(
+  model_fn   = "model",
+  hist_fn    = "example_data/historic_data.csv",
+  future_fn  = "example_data/future_data.csv",
+  preds_fn   = "example_data/predictions.csv",
+  geojson_fn = "example_data/historic_data.geojson"
+)
