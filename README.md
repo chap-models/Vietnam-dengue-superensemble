@@ -146,5 +146,5 @@ was used instead.
 Rscript isolated_run.R
 ```
 
-This runs against the synthetic five-province example data in `example_data/` and
-writes predictions to `example_data/predictions.csv`.
+This runs against the synthetic five-province example data in `input/` and
+writes predictions to `input/predictions.csv`.
