@@ -3,43 +3,173 @@
   "features": [
     {
       "type": "Feature",
-      "properties": {"id": "Province_A"},
+      "properties": {
+        "id": "Province_A"
+      },
       "geometry": {
         "type": "Polygon",
-        "coordinates": [[[0,0],[1,0],[1,1],[0,1],[0,0]]]
-      }
+        "coordinates": [
+          [
+            [
+              0,
+              0
+            ],
+            [
+              1,
+              0
+            ],
+            [
+              1,
+              1
+            ],
+            [
+              0,
+              1
+            ],
+            [
+              0,
+              0
+            ]
+          ]
+        ]
+      },
+      "id": "Province_A"
     },
     {
       "type": "Feature",
-      "properties": {"id": "Province_B"},
+      "properties": {
+        "id": "Province_B"
+      },
       "geometry": {
         "type": "Polygon",
-        "coordinates": [[[1,0],[2,0],[2,1],[1,1],[1,0]]]
-      }
+        "coordinates": [
+          [
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              0
+            ],
+            [
+              2,
+              1
+            ],
+            [
+              1,
+              1
+            ],
+            [
+              1,
+              0
+            ]
+          ]
+        ]
+      },
+      "id": "Province_B"
     },
     {
       "type": "Feature",
-      "properties": {"id": "Province_C"},
+      "properties": {
+        "id": "Province_C"
+      },
       "geometry": {
         "type": "Polygon",
-        "coordinates": [[[2,0],[3,0],[3,1],[2,1],[2,0]]]
-      }
+        "coordinates": [
+          [
+            [
+              2,
+              0
+            ],
+            [
+              3,
+              0
+            ],
+            [
+              3,
+              1
+            ],
+            [
+              2,
+              1
+            ],
+            [
+              2,
+              0
+            ]
+          ]
+        ]
+      },
+      "id": "Province_C"
     },
     {
       "type": "Feature",
-      "properties": {"id": "Province_D"},
+      "properties": {
+        "id": "Province_D"
+      },
       "geometry": {
         "type": "Polygon",
-        "coordinates": [[[3,0],[4,0],[4,1],[3,1],[3,0]]]
-      }
+        "coordinates": [
+          [
+            [
+              3,
+              0
+            ],
+            [
+              4,
+              0
+            ],
+            [
+              4,
+              1
+            ],
+            [
+              3,
+              1
+            ],
+            [
+              3,
+              0
+            ]
+          ]
+        ]
+      },
+      "id": "Province_D"
     },
     {
       "type": "Feature",
-      "properties": {"id": "Province_E"},
+      "properties": {
+        "id": "Province_E"
+      },
       "geometry": {
         "type": "Polygon",
-        "coordinates": [[[4,0],[5,0],[5,1],[4,1],[4,0]]]
-      }
+        "coordinates": [
+          [
+            [
+              4,
+              0
+            ],
+            [
+              5,
+              0
+            ],
+            [
+              5,
+              1
+            ],
+            [
+              4,
+              1
+            ],
+            [
+              4,
+              0
+            ]
+          ]
+        ]
+      },
+      "id": "Province_E"
     }
   ]
 }
