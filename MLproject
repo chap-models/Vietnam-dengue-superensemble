@@ -14,6 +14,7 @@ required_covariates:
 
 supported_period_type: month
 max_prediction_length: 1
+min_prediction_length: 1
 
 meta_data:
   display_name: Vietnam Dengue Superensemble
@@ -36,14 +37,6 @@ meta_data:
     (Centre for the Mathematical Modelling of Infectious Diseases; Department of
     Infectious Disease Epidemiology; Centre on Climate Change and Planetary Health)
     and the Tyndall Centre for Climate Change Research, University of East Anglia.
-
-adapters:
-  disease_cases: disease_cases
-  Cases: disease_cases
-  E: population
-  areaid: location
-  month: month
-  ID_year: year
 
 docker_env:
   image: ghcr.io/dhis2-chap/docker_r_inla:master

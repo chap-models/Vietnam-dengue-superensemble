@@ -56,9 +56,9 @@ and DIC scores.
 The original scripts (`04_Fit_models.R` etc.) were a batch analysis pipeline; this adaptation is a CHAP-callable service. The model formulas (f1–f5), all hyperparameters, and all preprocessing transformations are taken directly from the original. The following are intentional departures:
 
 - **INLA strategy** — original uses `strategy="gaussian", int.strategy="eb"`; this adaptation uses `strategy="simplified.laplace"` (with a `laplace` fallback) because the Gaussian strategy segfaults on the INLA devel build in Docker. `simplified.laplace` is a strictly more accurate approximation and does not change the model.
-- **f0 and multi-step lag propagation** [up for discussion] — the original fits a baseline model (f0, no climate covariates) iteratively across six leads to propagate `loglag` forward: predicted counts from lead *t* become the lag input for lead *t+1*. This is necessary when the full six-month forecast is produced in one batch. Here, CHAP drives the loop itself by calling `predict_chap` once per month and appending the previous prediction to the historic data before the next call. The lag is therefore always available as the last observed (or last predicted) row, and f0 is not needed.
-- **Rolling-mean warm-up NAs** [this should be checked] — the original fills forecast covariates from a pre-computed ensemble-member table. Here, the first 2–3 NA rows per province are back-filled with the first available value (`fill(.direction="up")`), since CHAP provides a single forecast member with no overlap.
-- **BMA DIC weighting** [this must also be checked in detail] — the original applies `reweight(dics)` (softmax on raw DIC values, which would give higher weight to *worse* models). This adaptation uses `reweight(-dics)` so that lower DIC correctly receives higher weight.
+- **f0 and multi-step lag propagation** — the original fits a baseline model (f0, no climate covariates) iteratively across six leads to propagate `loglag` forward. Here, CHAP drives the loop by calling `predict_chap` once per month and appending the previous prediction to the historic data, so f0 is not needed.
+- **Rolling-mean warm-up NAs** — the original fills forecast covariates from a pre-computed ensemble-member table. Here, the first 2–3 NA rows per province are back-filled with the first available value (`fill(.direction="up")`), since CHAP provides a single forecast member.
+- **BMA DIC weighting** — the original applies `reweight(dics)` (softmax on raw DIC, which would favour *worse* models). This adaptation uses `reweight(-dics)` so that lower DIC receives higher weight.
 - **Output format** — the original produces weighted summary statistics and epidemic-threshold metrics. This adaptation draws 1000 posterior predictive samples as required by CHAP.
 
 ## Climate forecast data
@@ -74,25 +74,6 @@ has an `ensmember` dimension.
 In this CHAP integration, CHAP supplies the future climate data directly as a single
 `future_data.csv` — the ensemble averaging or member selection is handled upstream by
 CHAP before the model is called.
-
-## How the original code handles multi-month forecasts (f0)
-
-The original pipeline produces all six forecast months in a single batch run. Because
-`loglag` (log of the previous month's case count) is a fixed covariate in all models,
-it needs a plausible value for every forecast month before f1–f5 can be fitted. The
-original solves this with a baseline model **f0** — identical random-effect structure to
-f1–f5 but no climate covariates — fitted iteratively six times:
-
-1. Fit f0 on data up to lead 1; extract the posterior mean for that forecast row as `lag1` for lead 2.
-2. Fit f0 on data up to lead 2; extract the posterior mean as `lag1` for lead 3.
-3. …repeat through lead 6.
-
-Once all six `loglag` values have been chained together this way, f1–f5 are each fitted
-once on the full six-month window with those propagated lags already in place.
-
-In this CHAP integration f0 is not needed because CHAP calls `predict_chap` one month
-at a time and appends the previous prediction to the historic data before each call, so
-the lag is always the last row of the observed series.
 
 ## Forecast horizon
 
@@ -116,28 +97,24 @@ historic data that includes the previous prediction as the most recent observati
 A GeoJSON file containing province boundaries is also required and is passed as the
 `geojson` argument to both `train` and `predict` entry points.
 
+## Missing historic disease counts
+
+If `disease_cases` is NA for some historic rows, those rows are excluded from the INLA
+likelihood but still contribute a lag value to the following month via last-observation-
+carried-forward (LOCF): the most recent non-NA count is used as the predecessor. This
+is reasonable when gaps are sparse. For series with substantial missing data the LOCF
+assumption becomes increasingly poor — consider imputing or excluding affected provinces
+before calling the model.
+
 ## Known warnings
 
-INLA may emit warnings of the form:
+`GMRFLib_2order_approx: rescue NAN/INF values in logl` — occurs when rolling-mean
+warm-up NAs at the start of a province's series make the linear predictor undefined.
+The back-fill in preprocessing (`fill(.direction="up")`) prevents this in normal use;
+if it appears on real data it is non-fatal.
 
-```
-*** WARNING *** GMRFLib_2order_approx: rescue NAN/INF values in logl
-```
-
-These occur when the log-likelihood returns NaN or Inf for extreme hyperparameter
-configurations during INLA's Laplace approximation. The immediate cause is NAs in the
-rolling-mean covariates (`tmin02`, `shum02`, etc.) that arise during the warm-up period
-at the start of each province's time series — any NA covariate makes the linear
-predictor NA, which propagates to the likelihood. The preprocessing step back-fills these warm-up NAs with the first available rolling
-mean per province before passing data to INLA, so the warnings should not appear in
-normal use. An alternative is to drop the warm-up rows entirely (filter out any row
-where a rolling-mean covariate is NA after computing the windows); this loses the first
-3–4 months of training data per province but avoids any imputation. If they do appear on real data, they are non-fatal: INLA substitutes a
-large negative value and continues, and the final predictions remain valid.
-
-Similarly, `vb.correction` divergence warnings are non-fatal. They indicate that INLA's
-variational Bayes correction step was skipped and the standard Laplace approximation
-was used instead.
+`vb.correction` divergence warnings are also non-fatal — INLA falls back to the
+standard Laplace approximation.
 
 ## Local development
 

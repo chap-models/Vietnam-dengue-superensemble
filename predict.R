@@ -1,10 +1,8 @@
 # Column mapping (CHAP name → internal name):
 #   disease_cases → dengue_cases   (count outcome)
-#   population    → population     (offset)
+#   population    → population     (offset, unchanged)
 #   location      → areaid         (spatial unit)
-#   time_period   → tsdatetime     (YYYY-MM)
-#   month         → month
-#   year          → year (before seasonal shift)
+#   time_period   → tsdatetime     (parsed to Date)
 
 options(warn = 1)
 
@@ -25,19 +23,28 @@ predict_chap <- function(model_fn, hist_fn, future_fn, preds_fn, geojson_fn) {
   historic_df <- read.csv(hist_fn, stringsAsFactors = FALSE)
   future_df   <- read.csv(future_fn, stringsAsFactors = FALSE)
 
-  # Future data has no outcome; add NA column so rbind works
+  # Multi-month forecasts must be driven by repeated single-month calls from CHAP.
+  loc_col       <- intersect(c("location", "areaid"), names(future_df))[1]
+  future_counts <- table(future_df[[loc_col]])
+  if (any(future_counts != 1L)) {
+    bad <- names(future_counts[future_counts != 1L])
+    stop("Future data must contain exactly 1 row per province. ",
+         "Got multiple rows for: ", paste(bad, collapse = ", "))
+  }
+
   future_df$disease_cases <- NA_integer_
+  historic_df$is_future   <- FALSE
+  future_df$is_future     <- TRUE
 
   df <- bind_rows(historic_df, future_df)
 
   # ------------------------------------------------------------------
-  # 2. Map to internal column names
-  #    CHAP's adapter system may have already added areaid/dengue_cases
-  #    alongside location/disease_cases, so we assign rather than rename
-  #    to avoid duplicate-column errors.
+  # 2. Rename CHAP columns to internal names
   # ------------------------------------------------------------------
-  if (!"areaid" %in% names(df))       df$areaid       <- df$location
-  if (!"dengue_cases" %in% names(df)) df$dengue_cases <- df$disease_cases
+  if ("location" %in% names(df))
+    names(df)[names(df) == "location"]      <- "areaid"
+  if ("disease_cases" %in% names(df))
+    names(df)[names(df) == "disease_cases"] <- "dengue_cases"
 
   df$tsdatetime <- ymd(paste0(df$time_period, "-01"))
 
@@ -53,7 +60,7 @@ predict_chap <- function(model_fn, hist_fn, future_fn, preds_fn, geojson_fn) {
 
   # ------------------------------------------------------------------
   # 5. Rolling means within province (model-specific preprocessing)
-  #    3-month window: temperature, precipitation, humidity, dtr
+  #    3-month window: temperature, humidity, dtr
   #    4-month window: Niño 3.4 (captures ENSO lead time)
   # ------------------------------------------------------------------
   df <- df %>%
@@ -65,15 +72,13 @@ predict_chap <- function(model_fn, hist_fn, future_fn, preds_fn, geojson_fn) {
       dtr02    = rollapply(dtr,                          3, mean, fill = NA, align = "right"),
       nino3403 = rollapply(nino34_anomaly,               4, mean, fill = NA, align = "right")
     ) %>%
-    # Back-fill NAs from the short rolling-mean warm-up period with the
-    # first available value per province so INLA receives no NA covariates.
+    # Back-fill warm-up NAs with the first available value per province.
     fill(tmin02, tmax02, shum02, dtr02, nino3403, .direction = "up") %>%
     ungroup()
 
   # ------------------------------------------------------------------
-  # 6. Seasonal index shift (−6 months)
-  #    The model's temporal random effects align with epidemiological
-  #    season, which peaks roughly 6 months after the climate signal.
+  # 6. Seasonal index shift (−6 months): aligns temporal random effects
+  #    with Vietnam's epidemiological season.
   # ------------------------------------------------------------------
   df$date2    <- df$tsdatetime %m-% months(6)
   df$ID.year  <- year(df$date2)
@@ -84,33 +89,20 @@ predict_chap <- function(model_fn, hist_fn, future_fn, preds_fn, geojson_fn) {
 
   # ------------------------------------------------------------------
   # 7. Lagged dengue cases
-  #    For the forecast period CHAP calls predict_chap once per month,
-  #    passing updated historic data that includes the previous
-  #    prediction. This means lag(dengue_cases, 1) is always defined
-  #    for the single forecast row produced per call. For any remaining
-  #    NA lags (first row of history per province), we use 0.
   # ------------------------------------------------------------------
+  # LOCF is applied inline to dengue_cases only for lag computation;
+  # disease_cases itself is not modified.
   df <- df %>%
     group_by(areaid) %>%
-    mutate(dengueL1 = dplyr::lag(dengue_cases, 1)) %>%
+    mutate(dengueL1 = dplyr::lag(zoo::na.locf(dengue_cases, na.rm = FALSE), 1)) %>%
     ungroup()
-
-  # Fill NA lags (forecast months where previous row is also NA or missing)
-  # with the last known observed count for that province.
-  last_obs <- df %>%
-    filter(!is.na(dengue_cases)) %>%
-    group_by(areaid) %>%
-    slice_tail(n = 1) %>%
-    select(areaid, last_dengue = dengue_cases) %>%
-    ungroup()
-
-  df <- df %>%
-    left_join(last_obs, by = "areaid") %>%
-    mutate(dengueL1 = if_else(is.na(dengueL1), last_dengue, dengueL1),
-           dengueL1 = if_else(is.na(dengueL1), 0, dengueL1)) %>%
-    select(-last_dengue)
 
   df$loglag <- log1p(df$dengueL1)
+
+  # NA loglag means no historic data precedes the forecast row, so the model cannot run.
+  if (any(is.na(df$loglag[df$is_future]))) {
+    stop("loglag is NA for prediction rows: historic data must cover at least 1 month per province.")
+  }
 
   # ------------------------------------------------------------------
   # 8. Numeric IDs for INLA random effects
@@ -125,7 +117,6 @@ predict_chap <- function(model_fn, hist_fn, future_fn, preds_fn, geojson_fn) {
   # ------------------------------------------------------------------
   # 9. Spatial adjacency graph from GeoJSON
   #    The GeoJSON must contain a "province" property matching areaid.
-  #    Replace geojson_fn with the real Vietnam province file in production.
   # ------------------------------------------------------------------
   map <- st_read(geojson_fn, quiet = TRUE)
 
@@ -149,9 +140,8 @@ predict_chap <- function(model_fn, hist_fn, future_fn, preds_fn, geojson_fn) {
 
   # ------------------------------------------------------------------
   # 10. Model formulas (identical to Colón-González et al. 2021)
-  #     All models share the BYM spatial + IID year-by-province +
-  #     AR1 month-by-province random effects and a log-lag covariate.
-  #     They differ in which environmental fixed effects are included.
+  #     Shared: BYM spatial + IID year-by-province + AR1 month-by-province.
+  #     Differ in environmental fixed effects (see README).
   # ------------------------------------------------------------------
   pc3  <- list(prior = "pc.prec", param = c(3, 0.01))
   pc_r <- list(prior = "pc.cor1", param = c(0.5, 0.75))
@@ -225,7 +215,6 @@ predict_chap <- function(model_fn, hist_fn, future_fn, preds_fn, geojson_fn) {
 
   # ------------------------------------------------------------------
   # 11. Fit all candidate models
-  # TODO: remove per-model prints once Docker convergence is confirmed
   # ------------------------------------------------------------------
   fit_model <- function(formula, idx) {
     cat(sprintf("Fitting model %d ...\n", idx))
@@ -243,7 +232,6 @@ predict_chap <- function(model_fn, hist_fn, future_fn, preds_fn, geojson_fn) {
         safe              = FALSE
       ),
       error = function(e) {
-        # TODO: remove fallback once Docker convergence is confirmed
         cat(sprintf("Model %d failed with simplified.laplace, retrying with laplace ...\n", idx))
         inla(
           formula,
@@ -270,23 +258,20 @@ predict_chap <- function(model_fn, hist_fn, future_fn, preds_fn, geojson_fn) {
   # ------------------------------------------------------------------
   mliks   <- get.mliks(myModels)
   dics    <- get.dics(myModels)
-  # reweight() is a softmax: higher values → higher weight.
-  # For mlik this is correct directly; for DIC, lower = better fit, so negate
-  # before softmax. The original code used reweight(dics) without negation,
-  # which would favour worse-fitting models — treated here as a bug.
+  # reweight() is softmax; negate DIC so lower (better fit) gets higher weight.
   weights <- reweight(mliks) * 0.5 + reweight(-dics) * 0.5
 
   # ------------------------------------------------------------------
   # 13. Posterior predictive samples (1000 total from BMA mixture)
   # ------------------------------------------------------------------
   s        <- 1000L
-  idx.pred <- which(is.na(df$dengue_cases))
+  idx.pred <- which(df$is_future)
   mpred    <- length(idx.pred)
 
   n_per_model <- round(weights * s)
   # Adjust for integer rounding so samples sum to exactly s
-  diff <- s - sum(n_per_model)
-  n_per_model[which.max(weights)] <- n_per_model[which.max(weights)] + diff
+  rounding_adj <- s - sum(n_per_model)
+  n_per_model[which.max(weights)] <- n_per_model[which.max(weights)] + rounding_adj
 
   y.pred <- matrix(NA_integer_, mpred, 0)
 
@@ -294,7 +279,6 @@ predict_chap <- function(model_fn, hist_fn, future_fn, preds_fn, geojson_fn) {
     nm <- n_per_model[m]
     if (nm < 1L) next
 
-    # Re-fit with marginals enabled for sampling
     xx    <- inla.posterior.sample(nm, myModels[[m]])
     xx.s  <- inla.posterior.sample.eval(
       function(idx.pred) c(theta[1], Predictor[idx.pred]),
